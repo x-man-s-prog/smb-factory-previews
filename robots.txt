@@ -1,0 +1,15 @@
+# Reference robots.txt for every deployed client preview (per
+# docs/WEBSITE_PRODUCT_PROTOCOL.md "Live, protected preview" and
+# docs/research/website_qa_rtl_deployment.md S2's "reasonable-deterrent implementation").
+#
+# Copy this file to the root of every preview deploy (deploy_preview.sh does this
+# automatically). Cloudflare Pages already sends an automatic `X-Robots-Tag: noindex`
+# header on preview deployments -- this file is belt-and-suspenders on top of that, and
+# the only layer that also applies if a preview is ever served from somewhere else
+# (the owner's own server, a Netlify draft, etc.) that doesn't send that header itself.
+#
+# This is a deterrent against routine crawling, not an access control -- see
+# docs/PREVIEW_SPEC.md's "What this does NOT claim."
+
+User-agent: *
+Disallow: /
