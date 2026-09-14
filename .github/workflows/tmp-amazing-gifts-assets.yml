@@ -1,0 +1,151 @@
+name: tmp-amazing-gifts-assets
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tmp-amazing-gifts-assets.yml'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install collector
+        run: pip install --disable-pip-version-check instaloader requests pillow
+      - name: Collect public Instagram assets
+        shell: bash
+        run: |
+          cat > /tmp/collect.py <<'PY'
+          import json, time, zipfile, shutil, os
+          from pathlib import Path
+          from itertools import islice
+          import requests
+          import instaloader
+          from instaloader import Profile
+          from PIL import Image
+
+          USERNAME='amazing_gifts_qatar'
+          OUT=Path('/tmp/amazing_gifts_qatar_assets')
+          OUT.mkdir(parents=True, exist_ok=True)
+          sess=requests.Session()
+          sess.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Referer':'https://www.instagram.com/'})
+
+          def dl(url, path):
+              r=sess.get(str(url), timeout=90, allow_redirects=True)
+              r.raise_for_status()
+              path.write_bytes(r.content)
+              return len(r.content), r.headers.get('content-type','')
+
+          def normalize_jpg(src, dst):
+              try:
+                  with Image.open(src) as im:
+                      if im.mode not in ('RGB','L'):
+                          bg=Image.new('RGB', im.size, 'white')
+                          if 'A' in im.mode:
+                              bg.paste(im, mask=im.getchannel('A'))
+                          else:
+                              bg.paste(im.convert('RGB'))
+                          im=bg
+                      elif im.mode!='RGB': im=im.convert('RGB')
+                      im.save(dst,'JPEG',quality=95,optimize=True)
+                  if src != dst: src.unlink(missing_ok=True)
+              except Exception:
+                  if src != dst: shutil.copy2(src,dst)
+
+          errors=[]; records=[]; count=0; bio=''; fullname=''; pic=''
+          L=instaloader.Instaloader(download_pictures=False, download_videos=False, download_video_thumbnails=False, save_metadata=False, compress_json=False, quiet=False, max_connection_attempts=3)
+          try:
+              p=Profile.from_username(L.context, USERNAME)
+              bio=p.biography or ''; fullname=p.full_name or ''; pic=str(p.profile_pic_url)
+              try:
+                  tmp=OUT/'profile.tmp'; dl(pic,tmp); normalize_jpg(tmp, OUT/'profile.jpg')
+              except Exception as e: errors.append('profile:'+repr(e))
+
+              for post in islice(p.get_posts(), 30):
+                  count += 1
+                  caption=post.caption or ''
+                  sc=post.shortcode
+                  media=None
+                  try:
+                      if post.typename=='GraphSidecar':
+                          nodes=list(post.get_sidecar_nodes())
+                          image_nodes=[n for n in nodes if not getattr(n,'is_video',False)]
+                          if image_nodes: media=image_nodes[0].display_url
+                          elif nodes: media=nodes[0].display_url
+                          else: media=post.url
+                      else:
+                          media=post.url
+                  except Exception:
+                      media=post.url
+
+                  fn=f'{count:02d}.jpg'; ok=False; err=''
+                  try:
+                      tmp=OUT/f'{count:02d}.tmp'; dl(media,tmp); normalize_jpg(tmp,OUT/fn); ok=(OUT/fn).exists() and (OUT/fn).stat().st_size>1000
+                  except Exception as e:
+                      err=repr(e); errors.append(fn+':'+err)
+                  records.append({'file':fn,'shortcode':sc,'post_url':f'https://www.instagram.com/p/{sc}/','caption':caption,'media_url':str(media),'downloaded':ok,'date_utc':post.date_utc.isoformat() if post.date_utc else None,'typename':post.typename})
+                  time.sleep(.6)
+          except Exception as e:
+              errors.append('instaloader_profile:'+repr(e))
+
+          # Fallback: public web profile info for at least the initial recent grid.
+          if count < 20:
+              try:
+                  h={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36','x-ig-app-id':'936619743392459','Accept':'*/*','Referer':f'https://www.instagram.com/{USERNAME}/'}
+                  u=sess.get(f'https://www.instagram.com/api/v1/users/web_profile_info/?username={USERNAME}',headers=h,timeout=60)
+                  u.raise_for_status(); user=u.json()['data']['user']
+                  if not bio: bio=user.get('biography') or ''
+                  if not fullname: fullname=user.get('full_name') or ''
+                  if not pic: pic=user.get('profile_pic_url_hd') or user.get('profile_pic_url') or ''
+                  if not (OUT/'profile.jpg').exists() and pic:
+                      try:
+                          tmp=OUT/'profile.tmp'; dl(pic,tmp); normalize_jpg(tmp,OUT/'profile.jpg')
+                      except Exception as e: errors.append('fallback_profile:'+repr(e))
+                  seen={r['shortcode'] for r in records}
+                  edges=((user.get('edge_owner_to_timeline_media') or {}).get('edges') or [])
+                  for edge in edges:
+                      if count>=30: break
+                      n=edge.get('node') or {}; sc=n.get('shortcode') or ''
+                      if not sc or sc in seen: continue
+                      ce=((n.get('edge_media_to_caption') or {}).get('edges') or [])
+                      caption=((ce[0].get('node') or {}).get('text') if ce else '') or ''
+                      media=n.get('display_url') or n.get('thumbnail_src')
+                      count += 1; fn=f'{count:02d}.jpg'; ok=False; err=''
+                      if media:
+                          try:
+                              tmp=OUT/f'{count:02d}.tmp'; dl(media,tmp); normalize_jpg(tmp,OUT/fn); ok=(OUT/fn).exists() and (OUT/fn).stat().st_size>1000
+                          except Exception as e: err=repr(e); errors.append(fn+':'+err)
+                      records.append({'file':fn,'shortcode':sc,'post_url':f'https://www.instagram.com/p/{sc}/','caption':caption,'media_url':media,'downloaded':ok})
+                      seen.add(sc)
+              except Exception as e:
+                  errors.append('web_profile_fallback:'+repr(e))
+
+          lines=['PROFILE',f'username: @{USERNAME}',f'name: {fullname}','bio:',bio,'','POSTS','']
+          for r in records:
+              lines.append(f"{r['file']}: {r['caption']}")
+              lines.append(f"URL: {r['post_url']}")
+              lines.append('')
+          (OUT/'captions.txt').write_text('\n'.join(lines),encoding='utf-8')
+          manifest={'username':USERNAME,'full_name':fullname,'bio':bio,'profile_pic_url':pic,'post_count_collected':len(records),'images_downloaded':sum(1 for r in records if r['downloaded']),'records':records,'errors':errors}
+          (OUT/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+          (OUT/'collector_status.txt').write_text(f"posts={len(records)}\nimages={manifest['images_downloaded']}\n"+'\n'.join(errors),encoding='utf-8')
+          zip_path=Path('/tmp/amazing_gifts_qatar_assets.zip')
+          with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(OUT.iterdir()):
+                  if f.is_file() and not f.name.endswith('.tmp'): z.write(f,f.name)
+          print((OUT/'collector_status.txt').read_text())
+          print('ZIP_BYTES',zip_path.stat().st_size)
+          PY
+          python /tmp/collect.py
+      - name: Upload ZIP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amazing-gifts-assets
+          path: /tmp/amazing_gifts_qatar_assets.zip
+          if-no-files-found: error
+          retention-days: 1
